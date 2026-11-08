@@ -151,7 +151,7 @@ function bot(st: State, seat: number, opts?: { level?: string; style?: { risk?: 
 
 const think = () => 1600
 // the table waits for the last shot to finish rolling before a bot steps up
-const settle = (st: State) => (st.shot ? Math.round(Math.min(st.shot.dur, 14) * 1000) + 500 : 0)
+const settle = (st: State) => (st.shot ? Math.round((Math.min(st.shot.dur, 14) / 1.3) * 1000) + 700 : 0)
 
 function view(st: State) {
   return {
