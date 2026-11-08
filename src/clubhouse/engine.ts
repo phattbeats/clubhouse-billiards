@@ -68,8 +68,28 @@ function build(spots: Spot[]): Table {
   return new Table(balls)
 }
 
-// roll one shot from the given positions. `fps` frames per second go in the replay as flat [x0,y0,x1,y1...] in mm.
+// The engine throws ("Depth exceeded resolving collisions") when a pile-up never settles, and prints a long diagnostic first. About
+// one random shot in four hundred does it; the same shot a hair to one side does not. So: roll quietly, and on a throw nudge the
+// angle and power by a hair and roll again (the replay carries the shot that was actually rolled).
 export function simulate(spots: Spot[], shot: Shot, fps = 30): Replay {
+  const { log, warn, error } = console
+  console.log = console.warn = console.error = () => {}
+  try {
+    for (let k = 0; ; k++) {
+      try {
+        const r = roll(spots, k ? { ...shot, a: shot.a + 0.0007 * k, p: shot.p * (1 - 0.001 * k) } : shot, fps)
+        return r
+      } catch (e) {
+        if (k >= 4) throw e
+      }
+    }
+  } finally {
+    console.log = log; console.warn = warn; console.error = error
+  }
+}
+
+// roll one shot from the given positions. `fps` frames per second go in the replay as flat [x0,y0,x1,y1...] in mm.
+function roll(spots: Spot[], shot: Shot, fps: number): Replay {
   const table = build(spots)
   const cue = table.cueball
   const offset = new Vector3(shot.ox ?? 0, shot.oy ?? 0, 0)

@@ -65,7 +65,8 @@ function apply(st: State, seat: number, mv: any): string | undefined {
   } else if (!balls[0]) return "no cue ball"
   const ang = Math.atan2(Math.sin(a), Math.cos(a))
   const lowest = lowestOn(balls)
-  const rep: Replay = simulate(balls, { a: ang, p, ox, oy })
+  let rep: Replay
+  try { rep = simulate(balls, { a: ang, p, ox, oy }) } catch { return "that shot could not be played, try another" } // (the engine gave up on a pile-up: nothing has changed)
   const sum = summarise(rep)
   st.seq++; st.shots++
   const pots = sum.potted.filter((i) => i > 0)

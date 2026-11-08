@@ -393,7 +393,7 @@ export async function create(parent, T, hooks) {
     },
     dispose() { S.gone = true; cancelAnimationFrame(S.raf); renderer.dispose(); root.remove(); },
   };
-  if (typeof window !== 'undefined' && window.__bqDebug) window.__bqS = S;
+  if (typeof window !== 'undefined' && window.__bqDebug) { S.cam = cam; window.__bqS = S; }
   S.raf = requestAnimationFrame(loop);
   return api;
 }
