@@ -55,6 +55,13 @@ function clothTexture(a, b) {
   return c;
 }
 
+// Where the cue tip is, in engine metres and height above the cloth, for a cue ball at c struck along angle a with the tip offset
+// (ox sideways to the left of the aim, oy up) and the tip `gap` metres short of the ball. The tip touches the ball surface at gap 0.
+export function cueTip(c, a, ox, oy, R, gap) {
+  const dx = Math.cos(a), dy = Math.sin(a), lat = ox * R, dh = oy * R, depth = Math.sqrt(Math.max(0, R * R - lat * lat - dh * dh)), back = depth + gap;
+  return { x: c.x - dx * back - dy * lat, y: c.y - dy * back + dx * lat, h: R + dh };
+}
+
 export async function create(parent, T, hooks) {
   let renderer;
   const el = document.createElement('canvas'); el.className = 'bq-gl';
@@ -83,7 +90,7 @@ export async function create(parent, T, hooks) {
   const S = {
     v: null, ctx: null, geo: null, built: false, seen: undefined, queue: [], play: null, pending: false, banner: 0, last: 0,
     angle: 0, power: 0.55, ox: 0, oy: 0, cue: null, dragging: false, dragBall: false, camMode: 'table', portrait: false, gone: false, raf: 0,
-    camPos: new T.Vector3(0, 3, 2), camLook: new T.Vector3(), felt: '', balls: [], quat: [], vis: [],
+    camPos: new T.Vector3(0, 3, 2), camLook: new T.Vector3(), yaw: 0, pitch: 0, zoom: 1, tip: null, felt: '', balls: [], quat: [], vis: [],
   };
   const W = (x, y, h = 0) => new T.Vector3(x, h, -y);
 
@@ -98,43 +105,72 @@ export async function create(parent, T, hooks) {
     const fx = geo.halfX + R, fy = geo.halfY + R; // the playing surface edge (where the ball touches the cushion)
     const felt = hooks.felt?.() || { a: '#1f6b45', b: '#0e3a24' };
     S.felt = felt.a + felt.b;
-    const tex = new T.CanvasTexture(clothTexture(felt.a, felt.b)); tex.colorSpace = T.SRGBColorSpace; tex.wrapS = tex.wrapT = T.RepeatWrapping; tex.repeat.set(5, 2.6);
-    const cloth = new T.Mesh(new T.PlaneGeometry(fx * 2, fy * 2), new T.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
+    const cd = 0.045, rh = 0.052, ch = 0.042, ox = fx + cd + 0.14, oy = fy + cd + 0.14; // cushion depth, rail and cushion heights, outer edge of the rail
+    const dark = new T.MeshBasicMaterial({ color: 0x050403 });
+    const rm = (p) => p.r * 1.12; // the hole in the cloth is a little wider than the capture circle, so a ball over the edge visibly goes in
+    // the deck: one sheet of cloth with a round hole cut at every pocket
+    const tex = new T.CanvasTexture(clothTexture(felt.a, felt.b)); tex.colorSpace = T.SRGBColorSpace; tex.wrapS = tex.wrapT = T.RepeatWrapping; tex.repeat.set(1.72, 1.72);
+    const deck = new T.Shape(); deck.moveTo(-ox, -oy); deck.lineTo(ox, -oy); deck.lineTo(ox, oy); deck.lineTo(-ox, oy); deck.closePath();
+    for (const p of geo.pockets) { const h = new T.Path(); h.absarc(p.x, p.y, rm(p), 0, TAU, true); deck.holes.push(h); }
+    const cloth = new T.Mesh(new T.ShapeGeometry(deck, 48), new T.MeshStandardMaterial({ map: tex, roughness: 0.95 }));
     cloth.rotation.x = -Math.PI / 2; cloth.receiveShadow = true; tableGroup.add(cloth);
-    // rail ring: wood, with the cushion (felt) lip inside it
-    const rw = 0.17, rh = 0.07, ox = fx + rw, oy = fy + rw;
-    const outer = new T.Shape(); outer.moveTo(-ox, -oy); outer.lineTo(ox, -oy); outer.lineTo(ox, oy); outer.lineTo(-ox, oy); outer.closePath();
-    const hole = new T.Path(); hole.moveTo(-fx, -fy); hole.lineTo(-fx, fy); hole.lineTo(fx, fy); hole.lineTo(fx, -fy); hole.closePath(); outer.holes.push(hole);
+    // each pocket is a dark well under the hole, with a brass lip
+    for (const p of geo.pockets) {
+      const q = W(p.x, p.y, 0);
+      const well = new T.Mesh(new T.CylinderGeometry(rm(p), rm(p) * 0.85, 0.12, 28, 1, true), new T.MeshBasicMaterial({ color: 0x070605, side: T.BackSide })); well.position.set(q.x, -0.06, q.z); tableGroup.add(well);
+      const floorD = new T.Mesh(new T.CircleGeometry(rm(p) * 0.85, 24), dark); floorD.rotation.x = -Math.PI / 2; floorD.position.set(q.x, -0.12, q.z); tableGroup.add(floorD);
+      const lip = new T.Mesh(new T.TorusGeometry(rm(p), 0.004, 8, 40), new T.MeshStandardMaterial({ color: 0xb59a5a, metalness: 0.8, roughness: 0.3 }));
+      lip.rotation.x = -Math.PI / 2; lip.position.set(q.x, 0.002, q.z); tableGroup.add(lip);
+    }
+    // the wooden rail: its opening is the cushion rectangle plus a round bite at every pocket (the outline is traced by angle from the centre)
+    const ix = fx + cd, iy = fy + cd, N = 1440, outline = [];
+    for (let k = 0; k < N; k++) {
+      const th = (k / N) * TAU, dx = Math.cos(th), dy = Math.sin(th);
+      let r = Math.min(Math.abs(dx) > 1e-9 ? ix / Math.abs(dx) : Infinity, Math.abs(dy) > 1e-9 ? iy / Math.abs(dy) : Infinity);
+      for (const p of geo.pockets) {
+        const R2 = rm(p) + 0.014, along = p.x * dx + p.y * dy, perp2 = p.x * p.x + p.y * p.y - along * along; if (along <= 0 || perp2 > R2 * R2) continue;
+        r = Math.max(r, along + Math.sqrt(R2 * R2 - perp2));
+      }
+      outline.push([dx * r, dy * r]);
+    }
+    const railShape = new T.Shape(); railShape.moveTo(-ox, -oy); railShape.lineTo(ox, -oy); railShape.lineTo(ox, oy); railShape.lineTo(-ox, oy); railShape.closePath();
+    const opening = new T.Path(); outline.slice().reverse().forEach(([x, y], k) => (k ? opening.lineTo(x, y) : opening.moveTo(x, y))); opening.closePath(); railShape.holes.push(opening);
     const woodC = document.createElement('canvas'); woodC.width = 256; woodC.height = 64; const wg = woodC.getContext('2d');
     wg.fillStyle = '#5a3418'; wg.fillRect(0, 0, 256, 64); let s = 5; const rr = () => ((s = (s * 16807) % 2147483647) / 2147483647);
     for (let i = 0; i < 34; i++) { wg.strokeStyle = `rgba(${rr() < 0.5 ? '20,8,0' : '150,100,55'},${0.08 + rr() * 0.16})`; wg.lineWidth = 0.6 + rr() * 1.8; wg.beginPath(); wg.moveTo(0, rr() * 64); wg.bezierCurveTo(80, rr() * 64, 170, rr() * 64, 256, rr() * 64); wg.stroke(); }
     const wood = new T.CanvasTexture(woodC); wood.colorSpace = T.SRGBColorSpace; wood.wrapS = wood.wrapT = T.RepeatWrapping; wood.repeat.set(0.4, 0.4);
-    const rail = new T.Mesh(new T.ExtrudeGeometry(outer, { depth: rh, bevelEnabled: true, bevelSize: 0.012, bevelThickness: 0.012, bevelSegments: 2 }), new T.MeshStandardMaterial({ map: wood, roughness: 0.55, metalness: 0.05 }));
+    const rail = new T.Mesh(new T.ExtrudeGeometry(railShape, { depth: rh, bevelEnabled: true, bevelSize: 0.006, bevelThickness: 0.008, bevelSegments: 2, curveSegments: 12 }), new T.MeshStandardMaterial({ map: wood, roughness: 0.55, metalness: 0.05 }));
     rail.rotation.x = -Math.PI / 2; rail.position.y = -0.0005; rail.castShadow = rail.receiveShadow = true; tableGroup.add(rail);
+    // cushions: felt-covered rubber, each ending at the knuckles of the jaws where the physics ends them
     const cmat = new T.MeshStandardMaterial({ color: felt.a, roughness: 0.9 });
-    for (const [w, d, x, z] of [[fx * 2, 0.045, 0, -fy - 0.0225], [fx * 2, 0.045, 0, fy + 0.0225], [0.045, fy * 2, -fx - 0.0225, 0], [0.045, fy * 2, fx + 0.0225, 0]]) {
-      const m = new T.Mesh(new T.BoxGeometry(w, rh + 0.012, d), cmat); m.position.set(x, (rh + 0.012) / 2 - 0.004, z); m.castShadow = m.receiveShadow = true; tableGroup.add(m);
+    const cornerIn = geo.halfX - (R * 1.6) / 0.5, midIn = (R * 1.385) / 0.5, endIn = geo.halfY - (R * 1.6) / 0.5, fl = 0.03; // (knuckle positions, as in pocketgeometry.ts)
+    const cushion = (x0, x1, y0, y1, horizontal) => { // x0..x1 along the rail, y0 = the face, y1 = the back; the back ends reach further toward the pocket
+      const sh = new T.Shape();
+      if (horizontal) { sh.moveTo(x0, y0); sh.lineTo(x1, y0); sh.lineTo(x1 + Math.sign(x1 - x0) * fl, y1); sh.lineTo(x0 - Math.sign(x1 - x0) * fl, y1); }
+      else { sh.moveTo(y0, x0); sh.lineTo(y0, x1); sh.lineTo(y1, x1 + Math.sign(x1 - x0) * fl); sh.lineTo(y1, x0 - Math.sign(x1 - x0) * fl); }
+      sh.closePath();
+      const m = new T.Mesh(new T.ExtrudeGeometry(sh, { depth: ch, bevelEnabled: true, bevelSize: 0.004, bevelThickness: 0.006, bevelSegments: 2 }), cmat);
+      m.rotation.x = -Math.PI / 2; m.castShadow = m.receiveShadow = true; tableGroup.add(m);
+    };
+    for (const sy of [-1, 1]) for (const sx of [-1, 1]) { // the long rails: two cushions each, split at the side pocket
+      const f = sy * fy, b = sy * (fy + cd), a0 = sx * midIn, a1 = sx * cornerIn;
+      cushion(a0, a1, f, b, true);
     }
-    // pockets: dark mouths cut into the rails
-    for (const p of geo.pockets) {
-      const mouth = new T.Mesh(new T.CircleGeometry(p.r * 1.02, 32), new T.MeshBasicMaterial({ color: 0x050403 }));
-      mouth.rotation.x = -Math.PI / 2; const q = W(p.x, p.y, rh + 0.0125 + 0.002); mouth.position.copy(q); tableGroup.add(mouth);
-      const ring = new T.Mesh(new T.TorusGeometry(p.r * 1.02, 0.007, 8, 36), new T.MeshStandardMaterial({ color: 0xb59a5a, metalness: 0.8, roughness: 0.3 }));
-      ring.rotation.x = -Math.PI / 2; ring.position.copy(q); tableGroup.add(ring);
-      const hole3 = new T.Mesh(new T.CylinderGeometry(p.r * 0.95, p.r * 0.8, 0.14, 24, 1, true), new T.MeshBasicMaterial({ color: 0x070605, side: T.BackSide })); hole3.position.set(q.x, q.y - 0.07, q.z); tableGroup.add(hole3);
-    }
-    // diamonds on the rails and the head spot
+    for (const sx of [-1, 1]) cushion(-endIn, endIn, sx * fx, sx * (fx + cd), false);
+    // diamonds on the rail top and the head and foot spots
     const dm = new T.MeshStandardMaterial({ color: 0xe8dcc0, roughness: 0.4 });
     for (let i = 1; i < 8; i++) { if (i === 4) continue;
-      for (const sgn of [-1, 1]) { const d = new T.Mesh(new T.CylinderGeometry(0.008, 0.008, 0.002, 12), dm); d.position.set(-fx + (i * fx * 2) / 8, rh + 0.0125, sgn * (fy + rw * 0.55)); tableGroup.add(d); }
+      for (const sgn of [-1, 1]) { const d = new T.Mesh(new T.CylinderGeometry(0.008, 0.008, 0.002, 12), dm); d.position.set(-fx + (i * fx * 2) / 8, rh + 0.0095, sgn * (fy + cd + 0.07)); tableGroup.add(d); }
     }
-    for (let i = 1; i < 4; i++) for (const sgn of [-1, 1]) { const d = new T.Mesh(new T.CylinderGeometry(0.008, 0.008, 0.002, 12), dm); d.position.set(sgn * (fx + rw * 0.55), rh + 0.0125, -fy + (i * fy * 2) / 4); tableGroup.add(d); }
+    for (let i = 1; i < 4; i++) for (const sgn of [-1, 1]) { const d = new T.Mesh(new T.CylinderGeometry(0.008, 0.008, 0.002, 12), dm); d.position.set(sgn * (fx + cd + 0.07), rh + 0.0095, -fy + (i * fy * 2) / 4); tableGroup.add(d); }
     const spot = new T.Mesh(new T.CircleGeometry(0.008, 16), new T.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 })); spot.rotation.x = -Math.PI / 2; spot.position.set(-geo.halfX / 2, 0.0008, 0); tableGroup.add(spot);
     const foot = spot.clone(); foot.position.x = geo.halfX / 2; tableGroup.add(foot);
-    // the legs and floor shadow keep the table from floating
+    // the legs and floor keep the table from floating
     const leg = new T.MeshStandardMaterial({ color: 0x2a190b, roughness: 0.6 });
-    for (const [x, z] of [[-ox + 0.12, -oy + 0.12], [ox - 0.12, -oy + 0.12], [-ox + 0.12, oy - 0.12], [ox - 0.12, oy - 0.12]]) { const l = new T.Mesh(new T.BoxGeometry(0.16, 0.8, 0.16), leg); l.position.set(x, -0.4, z); l.castShadow = true; tableGroup.add(l); }
+    for (const [x, z] of [[-ox + 0.12, -oy + 0.12], [ox - 0.12, -oy + 0.12], [-ox + 0.12, oy - 0.12], [ox - 0.12, oy - 0.12]]) { const l = new T.Mesh(new T.BoxGeometry(0.16, 0.67, 0.16), leg); l.position.set(x, -0.465, z); l.castShadow = true; tableGroup.add(l); }
+    for (const [w, d, x, z] of [[ox * 2, 0.02, 0, -oy + 0.01], [ox * 2, 0.02, 0, oy - 0.01], [0.02, oy * 2, -ox + 0.01, 0], [0.02, oy * 2, ox - 0.01, 0]]) { const k = new T.Mesh(new T.BoxGeometry(w, 0.13, d), leg); k.position.set(x, -0.065, z); tableGroup.add(k); } // the skirt under the rail
     const floor = new T.Mesh(new T.PlaneGeometry(14, 14), new T.MeshStandardMaterial({ color: 0x1d130b, roughness: 1 })); floor.rotation.x = -Math.PI / 2; floor.position.y = -0.8; floor.receiveShadow = true; tableGroup.add(floor);
+    S.rail = { ox, oy, rh };
     // balls
     while (ballsGroup.children.length) ballsGroup.children.pop();
     S.balls = []; S.quat = [];
@@ -163,6 +199,8 @@ export async function create(parent, T, hooks) {
   // ---- state helpers ------------------------------------------------------------------------------------------------------------
   const myTurn = () => !!(S.v && S.ctx && S.ctx.seat != null && !S.ctx.spectator && S.v.turn === S.ctx.seat && !S.v.over && !S.play && !S.queue.length && !S.pending);
   const cuePos = () => (S.v?.inHand && S.cue ? S.cue : S.v?.balls?.[0]);
+  // where the cue ball is for the stick and the cue camera: during a replay the cue ball's start (the server's view is already the end of the shot)
+  const stickBase = () => (S.play ? S.play.shot.from[0] : cuePos());
   const validSpot = (x, y) => {
     if (!S.geo) return false; const { halfX, halfY } = S.geo;
     if (Math.abs(x) > halfX - R * 0.3 || Math.abs(y) > halfY - R * 0.3) return false;
@@ -194,12 +232,14 @@ export async function create(parent, T, hooks) {
   }
 
   function placeCue(pull = 0, show = true) {
-    const cp = cuePos();
+    const cp = stickBase();
     cue.visible = !!(show && cp && (myTurn() || S.play?.phase === 'stroke'));
     if (!cue.visible) return;
-    const a = S.play ? S.play.shot.a : S.angle, back = R * 1.5 + 0.02 + pull + (S.play ? 0 : (S.power - 0.1) * 0.03);
-    cue.position.copy(W(cp.x - Math.cos(a) * back, cp.y - Math.sin(a) * back, R * 1.12 + 0.012));
-    cue.rotation.set(0, a, -0.035); // heading a in the plane (three z = -y), a slight rise
+    const sh = S.play?.shot, a = sh ? sh.a : S.angle, ox = sh ? sh.ox || 0 : S.ox, oy = sh ? sh.oy || 0 : S.oy;
+    const tip = cueTip(cp, a, ox, oy, R, 0.0008 + pull + (sh ? 0 : 0.012 + S.power * 0.04));
+    cue.position.set(tip.x, tip.h, -tip.y);
+    cue.rotation.set(0, a, -0.035); // heading a in the plane (three z = -y), a slight rise to the butt
+    S.tip = tip;
   }
 
   // ---- layout, camera ------------------------------------------------------------------------------------------------------------------
@@ -216,7 +256,7 @@ export async function create(parent, T, hooks) {
     if (el.width !== Math.round(w * dpr) || el.height !== Math.round(h * dpr)) { renderer.setPixelRatio(dpr); renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix(); }
     S.portrait = h > w * 1.08;
   }
-  const corners = () => { const g = S.geo, x = g.halfX + R + 0.2, y = g.halfY + R + 0.2; return [[-x, -y], [x, -y], [x, y], [-x, y]].flatMap(([a, b]) => [W(a, b, 0), W(a, b, 0.1)]); };
+  const corners = () => { const g = S.geo, x = (S.rail ? S.rail.ox : g.halfX + R + 0.2) + 0.03, y = (S.rail ? S.rail.oy : g.halfY + R + 0.2) + 0.03; return [[-x, -y], [x, -y], [x, y], [-x, y]].flatMap(([a, b]) => [W(a, b, 0), W(a, b, 0.1)]); };
   function fit(dir, up, target) {
     let lo = 0.8, hi = 9; const pts = corners(), v = new T.Vector3();
     for (let k = 0; k < 16; k++) {
@@ -226,26 +266,40 @@ export async function create(parent, T, hooks) {
     }
     return hi;
   }
+  // The cue camera sits behind the cue ball on the shot line. During a replay it uses the ball's start for the stroke, then follows the
+  // cue ball as it rolls; afterwards it settles behind the ball's new spot on the next aim.
+  const orbitQ = new T.Quaternion(), orbitE = new T.Euler(), yawAxis = new T.Vector3(0, 1, 0);
   function cameraTarget() {
     const tgt = new T.Vector3(), pos = new T.Vector3(), up = new T.Vector3(0, 1, 0);
-    if (S.camMode === 'cue' && S.v && cuePos() && !S.portrait) {
-      const cp = cuePos(), a = S.play ? S.play.shot.a : S.angle;
-      pos.copy(W(cp.x - Math.cos(a) * 0.85, cp.y - Math.sin(a) * 0.85, 0.42)); tgt.copy(W(cp.x + Math.cos(a) * 0.9, cp.y + Math.sin(a) * 0.9, 0));
-      return { pos, tgt, up };
+    let cueCam = false;
+    if (S.camMode === 'cue' && S.v && stickBase()) {
+      cueCam = true;
+      const a = S.play ? S.play.shot.a : S.angle, P = S.play, base = P && P.phase === 'roll' && S.balls[0].visible ? { x: S.balls[0].position.x, y: -S.balls[0].position.z } : stickBase();
+      const back = S.portrait ? 1.3 : 1.05, hgt = S.portrait ? 0.78 : 0.6, ahead = S.portrait ? 0.7 : 0.3; // far enough back and high enough that the stick is in frame
+      pos.copy(W(base.x - Math.cos(a) * back, base.y - Math.sin(a) * back, hgt)); tgt.copy(W(base.x + Math.cos(a) * ahead, base.y + Math.sin(a) * ahead, 0));
+    } else {
+      const dir = S.camMode === 'top' ? new T.Vector3(0, 1, 0.0001).normalize() : (S.portrait ? new T.Vector3(-0.62, 0.78, 0) : new T.Vector3(0, 0.78, 0.62)).normalize();
+      if (S.camMode === 'top') up.copy(S.portrait ? new T.Vector3(1, 0, 0) : new T.Vector3(0, 0, -1));
+      const d = fit(dir, up, tgt); pos.copy(tgt).addScaledVector(dir, d);
     }
-    const dir = S.camMode === 'top' ? new T.Vector3(0, 1, 0.0001).normalize() : (S.portrait ? new T.Vector3(-0.62, 0.78, 0) : new T.Vector3(0, 0.78, 0.62)).normalize();
-    if (S.camMode === 'top') up.copy(S.portrait ? new T.Vector3(1, 0, 0) : new T.Vector3(0, 0, -1));
-    const d = fit(dir, up, tgt); pos.copy(tgt).addScaledVector(dir, d);
+    if (S.yaw || S.pitch || S.zoom !== 1) { // the viewer's own orbit and zoom, about the point the camera looks at
+      const off = pos.clone().sub(tgt), right = new T.Vector3().crossVectors(off, up).normalize();
+      if (!right.lengthSq()) right.set(1, 0, 0);
+      orbitQ.setFromAxisAngle(yawAxis, S.yaw); off.applyQuaternion(orbitQ); right.applyQuaternion(orbitQ);
+      orbitQ.setFromAxisAngle(right, S.pitch); off.applyQuaternion(orbitQ);
+      if (S.camMode === 'top') { up.applyQuaternion(orbitQ); }
+      off.multiplyScalar(S.zoom); pos.copy(tgt).add(off); pos.y = Math.max(pos.y, cueCam ? 0.1 : 0.15);
+    }
     return { pos, tgt, up };
   }
   let fitKey = '';
   function updateCamera(dt, snap) {
-    const key = `${S.camMode}|${S.portrait}|${cam.aspect.toFixed(3)}|${S.geo ? S.geo.R : 0}`;
+    const key = `${S.camMode}|${S.portrait}|${cam.aspect.toFixed(3)}|${S.geo ? S.geo.R : 0}|${S.yaw.toFixed(3)}|${S.pitch.toFixed(3)}|${S.zoom.toFixed(3)}`;
     if (S.camMode === 'cue' || key !== fitKey || snap) {
       fitKey = key; const c = cameraTarget(); S.camGoal = c;
       if (snap || !S.camPosSet) { S.camPos.copy(c.pos); S.camLook.copy(c.tgt); S.camPosSet = true; }
     }
-    const k = 1 - Math.exp(-dt * 5), c = S.camGoal; if (!c) return;
+    const k = 1 - Math.exp(-dt * (S.camMode === 'cue' && S.play?.phase === 'roll' ? 3 : 5)), c = S.camGoal; if (!c) return;
     S.camPos.lerp(c.pos, k); S.camLook.lerp(c.tgt, k);
     cam.position.copy(S.camPos); cam.up.lerp(c.up, k).normalize(); cam.lookAt(S.camLook);
   }
@@ -253,13 +307,17 @@ export async function create(parent, T, hooks) {
   // ---- drawing the balls --------------------------------------------------------------------------------------------------------------------
   const q = new T.Quaternion(), axis = new T.Vector3(), up3 = new T.Vector3(0, 1, 0), dv = new T.Vector3();
   function putBall(i, x, y, sink = 0) {
-    const m = S.balls[i], z = R - sink * R * 2.4;
+    const m = S.balls[i]; let z = R;
+    if (sink > 0) { // a pocketed ball drops through the hole
+      if (m.userData.pk === undefined) { let best = 0, bd = Infinity; S.geo.pockets.forEach((p, k) => { const d = Math.hypot(p.x - x, p.y - y); if (d < bd) { bd = d; best = k; } }); m.userData.pk = best; }
+      const p = S.geo.pockets[m.userData.pk], e = Math.min(1, sink * 1.6); x += (p.x - x) * e * 0.5; y += (p.y - y) * e * 0.5; z = R - sink * sink * (0.06 + R * 2);
+    } else m.userData.pk = undefined;
     if (m.userData.px !== undefined) { // roll: turn the ball about the axis across its travel
       dv.set(x - m.userData.px, 0, -(y - m.userData.py)); const dist = dv.length();
       if (dist > 1e-6 && dist < 0.3) { axis.crossVectors(up3, dv).normalize(); q.setFromAxisAngle(axis, dist / R); S.quat[i].premultiply(q); }
     }
     m.userData.px = x; m.userData.py = y; m.position.set(x, z, -y); m.quaternion.copy(S.quat[i]);
-    m.scale.setScalar(R * (1 - sink * 0.25)); m.visible = sink < 1;
+    m.scale.setScalar(R); m.visible = sink < 1;
   }
   function resetBall(i, spot) { const m = S.balls[i]; m.userData.px = undefined; if (spot) putBall(i, spot.x, spot.y); m.visible = !!spot; m.userData.px = undefined; }
   function drawRest() {
@@ -281,12 +339,13 @@ export async function create(parent, T, hooks) {
   function stepPlay(dt) {
     const P = S.play, sh = P.shot;
     if (P.phase === 'stroke') {
-      P.t += dt; const u = P.t / 0.55, pull = u < 0.65 ? (u / 0.65) * (0.12 + sh.p * 0.2) : (0.12 + sh.p * 0.2) * (1 - (u - 0.65) / 0.35) - 0.0;
-      placeCue(Math.max(-0.02, pull), true);
+      P.t += dt; if (S.holdAt != null) P.t = Math.min(P.t, S.holdAt); // (S.holdAt: a test freezes the replay here for a screenshot)
+      const u = Math.min(1, P.t / 0.6), back = 0.1 + sh.p * 0.2, k = (u - 0.6) / 0.4, pull = u < 0.6 ? 0.012 + (u / 0.6) * (back - 0.012) : back * (1 - k * k); // draw back, then drive forward to touch the ball
+      placeCue(Math.max(0, pull), true);
       if (u >= 1) { P.phase = 'roll'; P.t = 0; cue.visible = false; hooks.sound?.('cue', clamp(0.25 + sh.p, 0.2, 1)); }
       return;
     }
-    P.t += dt * SPEED;
+    P.t += dt * SPEED; if (S.holdAt != null) P.t = Math.min(P.t, S.holdAt);
     while (P.ev < sh.events.length && sh.events[P.ev].t <= P.t) {
       const e = sh.events[P.ev++];
       if (e.k === 'pot') { P.pot[e.a] = e.t; hooks.sound?.('pot', 0.8); } else if (e.k === 'hit') hooks.sound?.('hit', 0.45); else hooks.sound?.('rail', 0.35);
@@ -296,7 +355,7 @@ export async function create(parent, T, hooks) {
       if (!S.balls[k].visible && P.pot[k] === undefined && !sh.from[k]) continue;
       const x = (A[k * 2] + (B[k * 2] - A[k * 2]) * u) / 1000, y = (A[k * 2 + 1] + (B[k * 2 + 1] - A[k * 2 + 1]) * u) / 1000;
       const pt = P.pot[k]; if (!sh.from[k] || (k === 0 && !sh.from[0])) continue;
-      putBall(k, x, y, pt === undefined ? 0 : clamp((P.t - pt) / 0.4, 0, 1));
+      putBall(k, x, y, pt === undefined ? 0 : clamp((P.t - pt) / 0.35, 0, 1));
     }
     if (P.t >= sh.dur + 0.15) endPlay();
   }
@@ -332,20 +391,35 @@ export async function create(parent, T, hooks) {
     ray.setFromCamera(ndc, cam); if (!ray.ray.intersectPlane(plane, hit)) return null; return { x: hit.x, y: -hit.z };
   }
   function aimTo(p) { const cp = cuePos(); if (!cp || !p) return; const dx = p.x - cp.x, dy = p.y - cp.y; if (Math.hypot(dx, dy) > R * 0.5) S.angle = Math.atan2(dy, dx); }
+  // Pointers: one finger or the left button aims (or moves the cue ball) on your turn; with nothing to aim it looks around. The right
+  // button, or two fingers, always orbit (and pinch zooms); the wheel zooms, shift+wheel nudges the aim.
+  const ptrs = new Map(); let orbiting = null, pinch = 0;
+  const orbitBy = (dx, dy) => { S.yaw -= dx * 0.006; S.pitch = clamp(S.pitch + dy * 0.005, -1.2, 0.6); };
+  const pinchDist = () => { const [a, b] = [...ptrs.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
+  el.addEventListener('contextmenu', (e) => e.preventDefault());
   el.addEventListener('pointerdown', (e) => {
-    if (!myTurn()) return; const p = worldAt(e); if (!p) return; el.setPointerCapture?.(e.pointerId);
+    el.setPointerCapture?.(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 2) { S.dragging = S.dragBall = false; orbiting = 'pair'; pinch = pinchDist(); return; }
+    if (e.button === 2 || !myTurn()) { orbiting = 'one'; return; }
+    const p = worldAt(e); if (!p) return;
     const cp = cuePos();
     if (S.v.inHand && cp && Math.hypot(p.x - cp.x, p.y - cp.y) < R * 3) { S.dragBall = true; if (!S.cue) S.cue = { ...cp }; return; }
     S.dragging = true; aimTo(p);
   });
   el.addEventListener('pointermove', (e) => {
+    const prev = ptrs.get(e.pointerId); if (prev) ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (orbiting === 'pair' && ptrs.size === 2 && prev) {
+      const d = pinchDist(); if (pinch > 0 && d > 0) S.zoom = clamp(S.zoom * (pinch / d), 0.35, 1.6); pinch = d;
+      orbitBy((e.clientX - prev.x) / 2, (e.clientY - prev.y) / 2); return;
+    }
+    if (orbiting === 'one' && prev) { orbitBy(e.clientX - prev.x, e.clientY - prev.y); return; }
     if (!myTurn()) return; const p = worldAt(e); if (!p) return;
     if (S.dragBall) { if (validSpot(p.x, p.y)) S.cue = { x: p.x, y: p.y }; else { const g = S.geo; const cx = clamp(p.x, -g.halfX + R, S.v.breakShot ? -g.halfX / 2 : g.halfX - R), cy = clamp(p.y, -g.halfY + R, g.halfY - R); if (validSpot(cx, cy)) S.cue = { x: cx, y: cy }; } drawRest(); }
     else if (S.dragging) aimTo(p);
   });
-  const up = () => { S.dragging = S.dragBall = false; };
+  const up = (e) => { ptrs.delete(e.pointerId); if (ptrs.size < 2 && orbiting === 'pair') orbiting = null; if (!ptrs.size) orbiting = null; S.dragging = S.dragBall = false; };
   el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
-  el.addEventListener('wheel', (e) => { if (!myTurn()) return; e.preventDefault(); S.angle += Math.sign(e.deltaY) * 0.0035; }, { passive: false });
+  el.addEventListener('wheel', (e) => { e.preventDefault(); if (e.shiftKey && myTurn()) S.angle += Math.sign(e.deltaY || e.deltaX) * 0.0035; else S.zoom = clamp(S.zoom * Math.exp(Math.sign(e.deltaY) * 0.08), 0.35, 1.6); }, { passive: false });
   pow.addEventListener('input', () => { S.power = clamp(pow.value / 100, 0.06, 1); });
   // (the pad is inside the zoomed stage, so read the pointer as a fraction of the pad's own box, in the pad's own units)
   const spinAt = (e) => { let x = (e.offsetX / spinPad.offsetWidth - 0.5) * 2, y = -(e.offsetY / spinPad.offsetHeight - 0.5) * 2; const l = Math.hypot(x, y); if (l > 1) { x /= l; y /= l; } S.ox = Math.round(x * 0.45 * 100) / 100; S.oy = Math.round(y * 0.45 * 100) / 100; };
@@ -354,7 +428,7 @@ export async function create(parent, T, hooks) {
   spinPad.addEventListener('pointermove', (e) => { if (spinDown) spinAt(e); });
   spinPad.addEventListener('pointerup', () => { spinDown = false; });
   spinPad.addEventListener('dblclick', () => { S.ox = S.oy = 0; });
-  viewBtn.addEventListener('click', () => { S.camMode = S.camMode === 'table' ? 'top' : S.camMode === 'top' ? 'cue' : 'table'; viewBtn.textContent = S.camMode === 'table' ? 'Camera: table' : S.camMode === 'top' ? 'Camera: top' : 'Camera: cue'; fitKey = ''; });
+  viewBtn.addEventListener('click', () => { S.camMode = S.camMode === 'table' ? 'top' : S.camMode === 'top' ? 'cue' : 'table'; S.yaw = S.pitch = 0; S.zoom = 1; viewBtn.textContent = S.camMode === 'table' ? 'Camera: table' : S.camMode === 'top' ? 'Camera: top' : 'Camera: cue'; fitKey = ''; });
   viewBtn.textContent = 'Camera: table';
   goBtn.addEventListener('click', () => {
     if (!myTurn()) return;
@@ -393,7 +467,10 @@ export async function create(parent, T, hooks) {
     },
     dispose() { S.gone = true; cancelAnimationFrame(S.raf); renderer.dispose(); root.remove(); },
   };
-  if (typeof window !== 'undefined' && window.__bqDebug) { S.cam = cam; window.__bqS = S; }
+  if (typeof window !== 'undefined' && window.__bqDebug) { // test hooks: the camera, the state, the cue stick, a render-now, and a straight-down probe of the table
+    S.cam = cam; window.__bqS = S; S.cueObj = cue; S.render = () => renderer.render(scene, cam); S.glEl = el;
+    S.probe = (x, y) => { const h = new T.Raycaster(new T.Vector3(x, 2, -y), new T.Vector3(0, -1, 0)).intersectObjects(tableGroup.children, false)[0]; return h ? h.point.y : null; };
+  }
   S.raf = requestAnimationFrame(loop);
   return api;
 }
