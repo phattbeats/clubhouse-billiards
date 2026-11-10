@@ -33,7 +33,8 @@
     "deps": "npx yarn-check --skip-unused -i typescript",
     "gltfpack": "npx gltfpack -i dist/models/p8.gltf -o dist/models/p8.min.gltf && npx gltfpack -i dist/models/threecushion.gltf -o dist/models/threecushion.min.gltf && npx gltfpack -i dist/models/snooker.gltf -o dist/models/snooker.min.gltf",
     "indexnow": "node test/indexnow.mjs",
-    "indexnow:test": "node test/indexnow.mjs --test"
+    "indexnow:test": "node test/indexnow.mjs --test",
+    "build:clubhouse": "node build-clubhouse.mjs"
   },
   "dependencies": {
     "@tailuge/messaging": "1.47.0",
@@ -54,6 +55,7 @@
     "canvas": "3.2.3",
     "chai": "6.3.0",
     "concurrently": "10.0.7",
+    "esbuild": "^0.28.2",
     "eslint": "10.14.0",
     "eslint-plugin-html": "8.2.1",
     "eslint-plugin-sonarjs": "4.2.2",
