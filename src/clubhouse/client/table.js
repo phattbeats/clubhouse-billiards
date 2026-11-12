@@ -360,6 +360,11 @@ export async function create(parent, T, hooks) {
     const fc = firstContact(cp, S.angle);
     // the call: the first ball and the pocket it is heading for (the player can tap a different pocket or ball)
     S.autoCall = fc.ball > 0 && (S.v.wanted || []).includes(fc.ball) ? { b: fc.ball, p: pocketAlong(S.v.balls[fc.ball], fc.ox, fc.oy) } : null;
+    if (!S.autoCall && S.v.needCall) { // not aiming straight at one of yours (a kick, a combination, a ball in the way): call the one of yours nearest the line
+      const dx = Math.cos(S.angle), dy = Math.sin(S.angle);
+      const near = (S.v.wanted || []).map((b) => { const o = S.v.balls[b]; if (!o) return null; const rx = o.x - cp.x, ry = o.y - cp.y, along = rx * dx + ry * dy; return { b, o, d: Math.abs(-rx * dy + ry * dx) + (along < 0 ? 10 : 0) }; }).filter(Boolean).sort((p, q) => p.d - q.d)[0];
+      if (near) { const ux = near.o.x - cp.x, uy = near.o.y - cp.y, ul = Math.hypot(ux, uy) || 1; S.autoCall = { b: near.b, p: pocketAlong(near.o, ux / ul, uy / ul) }; }
+    }
     const call = currentCall();
     if (S.v.needCall && call && call.p >= 0) { const p = S.geo.pockets[call.p]; callRing.position.copy(W(p.x, p.y, 0.003)); callRing.scale.setScalar(p.r * 1.05 + 0.004 * Math.sin(performance.now() / 180)); callRing.visible = true; }
     if (off) return;
