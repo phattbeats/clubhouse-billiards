@@ -97,3 +97,4 @@ src/utils/version.ts
 dist/fit/corners/**
 
 package-lock.json
+dist-clubhouse/

@@ -626,4 +626,5 @@ export default {
   id: "billiards", name: "Billiards", category: "sports", tagline: "8-ball, 9-ball and Cutthroat in 3D. Real spin, throw, cushions and pocket jaws.",
   min: 1, max: 4, defaultSeats: 2, options, init, view, apply, bot, info, think, settle, testTrials: 1,
 }
-export { judge, targets, wanted, needCall, candidates }
+export { judge, targets, wanted, needCall, candidates, resolveVariant as variantFor }
+export { simulate, report, rack, geometry, squirt, strike } from "./engine"
