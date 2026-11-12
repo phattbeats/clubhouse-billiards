@@ -48,6 +48,7 @@ const CSS = `
 .bq-dial { width:168px; height:168px; border-radius:50%; position:relative; background:radial-gradient(circle at 38% 32%, #fff, #e4e4e4 60%, #a9a9a9); box-shadow:inset -10px -12px 24px #0004, 0 0 0 3px #fff3; touch-action:none; cursor:crosshair; }
 .bq-dial::before { content:''; position:absolute; inset:8.5%; border-radius:50%; box-shadow:0 0 0 2px #d22c2c88 inset; }
 .bq-dial::after { content:''; position:absolute; left:50%; top:50%; width:1px; height:1px; box-shadow:0 -84px 0 0 #0002, 0 84px 0 0 #0002; }
+.bq-dial i, .bq-dial b { pointer-events:none; }
 .bq-dial i { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); width:4px; height:4px; border-radius:50%; background:#0004; }
 .bq-dial b { width:16px; height:16px; margin:-8px 0 0 -8px; }
 .bq-spinside { display:flex; flex-direction:column; gap:8px; font:600 12px system-ui,sans-serif; min-width:130px; }
@@ -334,7 +335,7 @@ export async function create(parent, T, hooks) {
   // the pocket a ball heading (ux, uy) from b is going for: the one nearest its line, ahead of it
   function pocketAlong(b, ux, uy) {
     let best = -1, bd = Infinity;
-    S.geo.pockets.forEach((p, k) => { const px = p.x - b.x, py = p.y - b.y, along = px * ux + py * uy; if (along <= 0) return; const perp = Math.abs(-px * uy + py * ux); const score = perp / Math.max(0.15, along) + perp; if (score < bd && perp < 0.2 + along * 0.25) { bd = score; best = k; } });
+    S.geo.pockets.forEach((p, k) => { const px = p.x - b.x, py = p.y - b.y, along = px * ux + py * uy; if (along <= 0) return; const perp = Math.abs(-px * uy + py * ux); const score = perp / Math.max(0.15, along) + perp; if (score < bd) { bd = score; best = k; } });
     return best;
   }
   function currentCall() {
@@ -531,11 +532,14 @@ export async function create(parent, T, hooks) {
   function endPlay() {
     const sh = S.play.shot; S.play = null;
     drawRest(); drawTray(true);
+    // every shot starts fresh: the cue ball unplaced, no safety or push, no call, center ball (the cue's elevation stays)
+    S.safe = S.push = false; S.callB = S.callP = null; S.placeLock = false; S.ox = S.oy = 0; S.cue = S.v?.inHand ? null : S.cue;
+    if (S.v?.inHand && S.v.turn === S.ctx?.seat) S.cue = S.v.balls[0] && validSpot(S.v.balls[0].x, S.v.balls[0].y) ? { ...S.v.balls[0] } : { x: S.v.geo.headX - R * 3, y: 0 };
     if (myTurn() && !S.v.breakShot) { autoAim(); S.power = 0.45; }
     const who = hooks.seatName?.(sh.seat) || '';
     const t = sh.tags || [];
     let txt = '', cls = 'good', sub = '';
-    if (sh.win) { txt = S.v?.variant === '9ball' ? 'NINE BALL!' : S.v?.variant === 'cutthroat' ? 'LAST ONE STANDING' : 'THE 8 BALL!'; cls = 'gold'; sub = sh.note; }
+    if (sh.win) { txt = S.v?.variant === '9ball' ? (sh.brk ? 'GOLDEN BREAK!' : 'NINE BALL!') : S.v?.variant === 'cutthroat' ? 'LAST ONE STANDING' : 'THE 8 BALL!'; cls = 'gold'; const w = (S.v?.winners || []).map((k) => hooks.seatName?.(k) || `Seat ${k + 1}`); sub = w.length ? `${w.join(' & ')} win${w.length > 1 || w[0] === 'You' ? '' : 's'}` : ''; }
     else if (sh.lose) { txt = sh.note.toUpperCase(); cls = 'foul'; }
     else if (sh.foul) { txt = `FOUL · ${sh.foul}`; cls = 'foul'; sub = sh.note !== sh.foul ? sh.note : ''; }
     else if (t.includes('combo')) { txt = 'COMBINATION!'; sub = who; }
@@ -719,7 +723,8 @@ export async function create(parent, T, hooks) {
   window.addEventListener('keydown', onKey);
   pow.addEventListener('input', () => { S.power = clamp(pow.value / 100, 0.04, 1); });
   // the spin dial: tap where the tip meets the cue ball; the cue's elevation under it
-  const spinAt = (e) => { const r = dial.getBoundingClientRect(); let x = ((e.clientX - r.left) / r.width - 0.5) * 2, y = -((e.clientY - r.top) / r.height - 0.5) * 2; const l = Math.hypot(x, y); if (l > 1) { x /= l; y /= l; } x /= 0.92; y /= 0.92; const L = Math.hypot(x, y); if (L > 1) { x /= L; y /= L; } S.ox = Math.round(x * 0.62 * 100) / 100; S.oy = Math.round(y * 0.62 * 100) / 100; drawSpinPop(); };
+  // (the dial is inside the zoomed stage: read the pointer in the dial's own units, offsetX over offsetWidth, not page pixels)
+  const spinAt = (e) => { if (e.target !== dial) return; let x = (e.offsetX / dial.offsetWidth - 0.5) * 2, y = -(e.offsetY / dial.offsetHeight - 0.5) * 2; const l = Math.hypot(x, y); if (l > 1) { x /= l; y /= l; } x /= 0.92; y /= 0.92; const L = Math.hypot(x, y); if (L > 1) { x /= L; y /= L; } S.ox = Math.round(x * 0.62 * 100) / 100; S.oy = Math.round(y * 0.62 * 100) / 100; drawSpinPop(); };
   let spinDown = false;
   dial.addEventListener('pointerdown', (e) => { spinDown = true; dial.setPointerCapture?.(e.pointerId); spinAt(e); e.stopPropagation(); });
   dial.addEventListener('pointermove', (e) => { if (spinDown) spinAt(e); });
@@ -772,7 +777,7 @@ export async function create(parent, T, hooks) {
     dispose() { S.gone = true; cancelAnimationFrame(S.raf); window.removeEventListener('keydown', onKey); renderer.dispose(); root.remove(); },
   };
   if (typeof window !== 'undefined' && window.__bqDebug) { // test hooks: the camera, the state, the cue stick, a render-now, and a straight-down probe of the table
-    S.cam = cam; window.__bqS = S; S.cueObj = cue; S.render = () => renderer.render(scene, cam); S.glEl = el; S.shoot = shoot; S.toScreen = toScreen;
+    S.cam = cam; window.__bqS = S; S.cueObj = cue; S.render = () => renderer.render(scene, cam); S.glEl = el; S.shoot = shoot; S.toScreen = toScreen; S.myTurn = myTurn;
     S.probe = (x, y) => { const h = new T.Raycaster(new T.Vector3(x, 2, -y), new T.Vector3(0, -1, 0)).intersectObjects(tableGroup.children, false)[0]; return h ? h.point.y : null; };
   }
   S.raf = requestAnimationFrame(loop);
